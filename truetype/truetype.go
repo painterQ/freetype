@@ -15,10 +15,13 @@
 //
 // To measure a TrueType font in ideal FUnit space, use scale equal to
 // font.FUnitsPerEm().
-package truetype // import "github.com/golang/freetype/truetype"
+package truetype // import "github.com/painterQ/freetype/truetype"
 
 import (
 	"fmt"
+	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"golang.org/x/image/math/fixed"
 )
@@ -421,22 +424,78 @@ func (f *Font) Name(id NameID) string {
 	// Return the ASCII value of the encoded string.
 	// The string is encoded as UTF-16 on non-Apple platformIDs; Apple is platformID 1.
 	src := f.name[offset : offset+length]
-	var dst []byte
 	if platformID != 1 { // UTF-16.
-		if len(src)&1 != 0 {
+		if len(src)&1 != 0 { //奇数长度
 			return ""
 		}
-		dst = make([]byte, len(src)/2)
+
+		dst := make([]uint16, len(src)/2)
 		for i := range dst {
-			dst[i] = printable(u16(src, 2*i))
+			dst[i] = u16(src, 2*i)
 		}
+		return decodeUTF16ToString(dst)
 	} else { // ASCII.
-		dst = make([]byte, len(src))
+		dst := make([]byte, len(src))
 		for i, c := range src {
 			dst[i] = printable(uint16(c))
 		}
+		return string(dst)
 	}
-	return string(dst)
+
+}
+
+func decodeUTF16ToString(s []uint16) string {
+
+	const (
+		replacementChar = '\uFFFD'     // Unicode replacement character
+		maxRune         = '\U0010FFFF' // Maximum valid Unicode code point.
+	)
+
+	const (
+		// 0xd800-0xdc00 encodes the high 10 bits of a pair.
+		// 0xdc00-0xe000 encodes the low 10 bits of a pair.
+		// the value is those 20 bits plus 0x10000.
+		surr1 = 0xd800
+		surr2 = 0xdc00
+		surr3 = 0xe000
+
+		surrSelf = 0x10000
+	)
+
+	n := 0
+	for i := 0; i < len(s); i++ {
+		switch r := s[i]; {
+		case r < surr1, surr3 <= r:
+			// normal rune
+			n += utf8.RuneLen(rune(r))
+		case surr1 <= r && r < surr2 && i+1 < len(s) &&
+			surr2 <= s[i+1] && s[i+1] < surr3:
+			// valid surrogate sequence
+			n += utf8.RuneLen(utf16.DecodeRune(rune(r), rune(s[i+1])))
+			i++
+		default:
+			// invalid surrogate sequence
+			n += utf8.RuneLen(replacementChar)
+		}
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for i := 0; i < len(s); i++ {
+		switch r := s[i]; {
+		case r < surr1, surr3 <= r:
+			// normal rune
+			b.WriteRune(rune(r))
+		case surr1 <= r && r < surr2 && i+1 < len(s) &&
+			surr2 <= s[i+1] && s[i+1] < surr3:
+			// valid surrogate sequence
+			b.WriteRune(utf16.DecodeRune(rune(r), rune(s[i+1])))
+			i++
+		default:
+			// invalid surrogate sequence
+			b.WriteRune(replacementChar)
+		}
+	}
+	return b.String()
 }
 
 func printable(r uint16) byte {
